@@ -11,6 +11,7 @@ import { fileURLToPath }  from 'url';
 import log, { header }              from './system/log.js';
 import { loadCommands, loadEvents } from './system/login.js';
 import createHandlerAction          from './system/handlerAction.js';
+import { startWebServer }           from './web/server.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -470,6 +471,13 @@ global.Reze = {
 	cooldowns:              new Map(),
 	botUsername:            null,
 	bots:                   [],
+	uptimeHistory:          [],
+
+	// Tracks group chats that a secondary bot has already left.
+	// Key format: "<botIndex>:<chatId>"
+	// Prevents the leave-message from firing more than once per bot per chat
+	// in the unlikely event a message arrives while leaveChat() is in flight.
+	gcEvictedChats:         new Set(),
 
 	// AI / memory
 	aiConversations,
@@ -496,6 +504,20 @@ global.Reze = {
 	},
 };
 
+function recordUptimeSample() {
+	if (!global.Reze) return;
+	const sample = {
+		ts: Date.now(),
+		uptime: Date.now() - global.Reze.startTime,
+	};
+	const history = global.Reze.uptimeHistory || (global.Reze.uptimeHistory = []);
+	history.push(sample);
+	if (history.length > 4320) history.shift();
+}
+
+recordUptimeSample();
+setInterval(recordUptimeSample, 60000);
+
 // ─────────────────────────────────────────────────────────────────────────────
 //   BOOT SEQUENCE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -514,6 +536,7 @@ global.Reze = {
 
 	await loadCommands();
 	await loadEvents();
+	startWebServer();
 
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];

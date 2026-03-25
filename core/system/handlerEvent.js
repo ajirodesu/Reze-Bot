@@ -82,6 +82,68 @@ export default function createHandlerEvent(bot, groq) {
 		const chatId = msg?.chat?.id ?? event?.chat?.id;           
 		if (!chatId) return;
 
+		// ── Multi-bot conflict guard ──────────────────────────────────────────
+		// When multiple bot instances from the same Reze system are present in
+		// the same group chat, each one independently receives every message,
+		// which would cause duplicate responses and spam.
+		//
+		// Resolution strategy:
+		//   • The bot with the lowest `.index` in global.Reze.bots is elected
+		//     the "primary" for ALL group chats on this system.
+		//   • Every other bot (secondary) sends a single professional notice and
+		//     immediately leaves that group chat, leaving only one bot active.
+		//   • Private chats are never affected — every bot handles its own DMs.
+		//   • If the primary is later removed, the next-lowest index takes over.
+		//   • A per-bot per-chat eviction lock (gcEvictedChats) ensures the
+		//     leave message is sent exactly once even if events race.
+		const _chatType = msg?.chat?.type ?? event?.chat?.type ?? 'private';
+		if (_chatType !== 'private') {
+			const _bots = global.Reze?.bots ?? [];
+			if (_bots.length > 1) {
+				const _thisBotEntry = _bots.find(b => b.bot === bot);
+				const _primaryIndex = Math.min(..._bots.map(b => b.index));
+
+				if (_thisBotEntry && _thisBotEntry.index !== _primaryIndex) {
+					// ── This is a secondary (redundant) bot ─────────────────────────
+					const _evictKey = `${_thisBotEntry.index}:${chatId}`;
+					const _evicted  = global.Reze.gcEvictedChats ?? (global.Reze.gcEvictedChats = new Set());
+
+					if (!_evicted.has(_evictKey)) {
+						// Lock immediately to prevent a second message if events race
+						_evicted.add(_evictKey);
+
+						const _primaryBot = _bots.find(b => b.index === _primaryIndex);
+						const _primaryTag = _primaryBot?.username ? `@${_primaryBot.username}` : 'the primary instance';
+
+						const _leaveMsg =
+							`⚠️ *Multiple Bot Instances Detected*\n\n` +
+							`This group currently has more than one bot from the same system running simultaneously. ` +
+							`To prevent duplicate responses and ensure a clean, uninterrupted experience for all members, ` +
+							`this redundant instance (*@${_thisBotEntry.username ?? 'this bot'}*) will now withdraw from the group.\n\n` +
+							`${_primaryTag} will remain active and continue handling all commands and interactions as normal.\n\n` +
+							`_Departing now — thank you for your patience._`;
+
+						try {
+							await bot.sendMessage(chatId, _leaveMsg, { parse_mode: 'Markdown' });
+						} catch { /* best-effort — proceed to leave regardless */ }
+
+						try {
+							await bot.leaveChat(chatId);
+							global.Reze?.log?.warn(
+								`[Multi-Bot] @${_thisBotEntry.username} left group ${chatId} — ` +
+								`yielding to primary @${_primaryBot?.username ?? _primaryIndex}`
+							);
+						} catch (e) {
+							global.Reze?.log?.error(`[Multi-Bot] Failed to leave chat ${chatId}: ${e.message}`);
+						}
+					}
+
+					return; // This bot is done — primary handles everything from here
+				}
+			}
+		}
+		// ── End multi-bot conflict guard ──────────────────────────────────────
+
 		const from      = msg?.from || event?.from;
 		const senderID  = String(from?.id ?? '');                    // GoatBot: senderID
 		const messageID = msg?.message_id;                           // GoatBot: messageID
